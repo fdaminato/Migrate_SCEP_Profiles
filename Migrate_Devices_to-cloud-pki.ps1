@@ -24,7 +24,7 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$CertificatePolicyName = 'CLOUDPKI-FAIRSTONE-SCEP',
+    [string]$CertificatePolicyName = 'CLOUDPKI-PROFILE-SCEP',
 
     [Parameter()]
     [ValidatePattern('^$|^[0-9a-fA-F-]{36}$')]
