@@ -7,6 +7,20 @@
 
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
 param(
+    # Microsoft Graph app-only authentication using an Entra application client secret.
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[0-9a-fA-F-]{36}$')]
+    [string]$TenantId,
+
+    [Parameter(Mandatory)]
+    [ValidatePattern('^[0-9a-fA-F-]{36}$')]
+    [string]$ClientId,
+
+    # Use the client secret VALUE from Entra ID (not the Secret ID).
+    [Parameter(Mandatory)]
+    [ValidateNotNullOrEmpty()]
+    [string]$ClientSecret,
+
     # Step 1: devices with the temporary SCEP certificate are added here.
     [Parameter()]
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
@@ -24,7 +38,7 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$CertificatePolicyName = 'CLOUDPKI-PROFILE-SCEP',
+    [string]$CertificatePolicyName = 'CLOUDPKI-FAIRSTONE-SCEP',
 
     [Parameter()]
     [ValidatePattern('^$|^[0-9a-fA-F-]{36}$')]
@@ -43,11 +57,11 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$WiredPolicyName = '802.1X Wired Supplicant - 1 month certificate',
+    [string]$WiredPolicyName = 'ALL - System - Wired - Configuration (CLOUDPKI)',
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$WirelessPolicyName = '802.1X Wireless Supplicant - 1 month certificate',
+    [string]$WirelessPolicyName = 'ALL - System - Wifi - Configuration (CLOUDPKI)',
 
     [Parameter()]
     [ValidatePattern('^$|^[0-9a-fA-F-]{36}$')]
@@ -988,21 +1002,18 @@ if (-not $RunOnce) {
 # Connect once and validate the three groups
 # -----------------------------------------------------------------------------
 
-$requiredScopes = @(
-    'Group.Read.All',
-    'GroupMember.ReadWrite.All',
-    'Device.Read.All',
-    'DeviceManagementManagedDevices.Read.All',
-    # Required by POST /deviceManagement/managedDevices/{id}/syncDevice.
-    'DeviceManagementManagedDevices.PrivilegedOperations.All',
-    'DeviceManagementConfiguration.ReadWrite.All'
-)
+Write-Log -Level INFO -Message 'Connecting to Microsoft Graph using Entra application client secret authentication.'
 
-Write-Log -Level INFO -Message 'Connecting to Microsoft Graph.'
-Connect-MgGraph -Scopes $requiredScopes -NoWelcome
+$secureClientSecret = ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force
+$clientSecretCredential = New-Object System.Management.Automation.PSCredential($ClientId, $secureClientSecret)
+
+Connect-MgGraph `
+    -TenantId $TenantId `
+    -ClientSecretCredential $clientSecretCredential `
+    -NoWelcome
 
 $context = Get-MgContext
-Write-Log -Level SUCCESS -Message "Connected as $($context.Account) to tenant $($context.TenantId)."
+Write-Log -Level SUCCESS -Message "Connected using Entra application $($context.ClientId) to tenant $($context.TenantId)."
 
 $step1SourceGroup = Get-GroupDetails -GroupId $Step1SourceGroupId
 $step2Group = Get-GroupDetails -GroupId $Step2GroupId
