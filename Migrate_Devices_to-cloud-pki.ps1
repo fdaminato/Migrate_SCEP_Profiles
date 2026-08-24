@@ -21,7 +21,7 @@ param(
     [ValidateNotNullOrEmpty()]
     [string]$ClientSecret,
 
-    # Step 1: devices with the temporary SCEP certificate are added here.
+    # Step 1: devices with the Cloud PKI SCEP certificate profile are added here.
     [Parameter()]
     [ValidatePattern('^[0-9a-fA-F-]{36}$')]
     [string]$Step1SourceGroupId = '4b339bd0-2b5a-467c-a945-a8491dfc4fd1',
@@ -38,7 +38,7 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$CertificatePolicyName = 'CLOUDPKI-FAIRSTONE-SCEP',
+    [string]$CertificatePolicyName = 'CLOUDPKI-PROFILE-SCEP',
 
     [Parameter()]
     [ValidatePattern('^$|^[0-9a-fA-F-]{36}$')]
@@ -1082,7 +1082,7 @@ foreach ($managedDevice in $managedDevices) {
 $results = [System.Collections.Generic.List[object]]::new()
 
 # -----------------------------------------------------------------------------
-# STEP 1: temporary SCEP certificate -> add to Step 2 group
+# STEP 1: Cloud PKI SCEP certificate profile -> add to Step 2 group
 # -----------------------------------------------------------------------------
 
 Write-Host ''
@@ -1216,7 +1216,7 @@ foreach ($sourceDevice in $step1Devices) {
             continue
         }
 
-        $operationDescription = "Add device to '$($step2Group.displayName)' because the temporary SCEP certificate was issued"
+        $operationDescription = "Add device to '$($step2Group.displayName)' because the Cloud PKI SCEP certificate profile was issued"
         if ($PSCmdlet.ShouldProcess($deviceName, $operationDescription)) {
             $body = @{
                 '@odata.id' = "https://graph.microsoft.com/v1.0/directoryObjects/$entraObjectId"
