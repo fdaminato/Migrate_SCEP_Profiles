@@ -38,7 +38,7 @@ param(
 
     [Parameter()]
     [ValidateNotNullOrEmpty()]
-    [string]$CertificatePolicyName = 'CLOUDPKI-PROFILE-SCEP',
+    [string]$CertificatePolicyName = 'CLOUDPKI-FAIRSTONE-SCEP',
 
     [Parameter()]
     [ValidatePattern('^$|^[0-9a-fA-F-]{36}$')]
@@ -180,17 +180,73 @@ function Write-Log {
         [string]$Message
     )
 
-    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $timestamp = Get-Date -Format 'HH:mm:ss'
     $emoji = Get-LogEmoji -Level $Level -Message $Message
 
-    $foregroundColor = switch ($Level) {
-        'SUCCESS' { 'Green' }
-        'WARN'    { 'Yellow' }
-        'ERROR'   { 'Red' }
-        default   { 'Cyan' }
+    # Presentation only: this function intentionally changes no script logic.
+    # It uses separate Write-Host segments so timestamps, badges, context and
+    # messages can have different colors while keeping the same log content.
+    $levelStyle = switch ($Level) {
+        'SUCCESS' {
+            @{
+                Foreground = 'Black'
+                Background = 'Green'
+                TextColor  = 'Green'
+                Label      = ' OK '
+            }
+        }
+        'WARN' {
+            @{
+                Foreground = 'Black'
+                Background = 'Yellow'
+                TextColor  = 'Yellow'
+                Label      = ' WARN '
+            }
+        }
+        'ERROR' {
+            @{
+                Foreground = 'White'
+                Background = 'DarkRed'
+                TextColor  = 'Red'
+                Label      = ' ERROR '
+            }
+        }
+        default {
+            @{
+                Foreground = 'Black'
+                Background = 'Cyan'
+                TextColor  = 'Cyan'
+                Label      = ' INFO '
+            }
+        }
     }
 
-    Write-Host "[$timestamp] [$Level] $emoji $Message" -ForegroundColor $foregroundColor
+    # Give major workflow milestones a little visual breathing room.
+    $isSectionStart = $Message -match '(?i)^Starting (migration cycle|Step 1:|Step 2:|device sync)'
+    $isCycleEnd = $Message -match '(?i)^Cycle \d+ finished\.'
+    $isSummary = $Message -match '(?i)^(Step 1 completed\.|Step 2 completed\.|Device sync completed\.)'
+
+    if ($isSectionStart) {
+        Write-Host ''
+        Write-Host ((('─' * 92) -join '')) -ForegroundColor DarkGray
+    }
+
+    # Timestamp
+    Write-Host "[$timestamp] " -NoNewline -ForegroundColor DarkGray
+
+    # Colored level badge
+    Write-Host $levelStyle.Label `
+        -NoNewline `
+        -ForegroundColor $levelStyle.Foreground `
+        -BackgroundColor $levelStyle.Background
+
+    # Context emoji + message
+    Write-Host " $emoji " -NoNewline -ForegroundColor $levelStyle.TextColor
+    Write-Host $Message -ForegroundColor $levelStyle.TextColor
+
+    if ($isSummary -or $isCycleEnd) {
+        Write-Host ((('─' * 92) -join '')) -ForegroundColor DarkGray
+    }
 }
 
 function Get-ObjectValue {
