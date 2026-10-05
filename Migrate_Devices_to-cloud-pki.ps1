@@ -2,7 +2,7 @@
 #Requires -Modules Microsoft.Graph.Authentication
 
 # Version 5: keeps contextual emoji, colored console logging, throttling-safe
-# Intune export polling and continuous 30-second cycles.
+# Intune export polling, continuous 30-second cycles, and device sync.
 # Persistent CSV log/report creation has been removed.
 
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
@@ -93,6 +93,19 @@ param(
     [Parameter()]
     [switch]$UseTransitiveStep2Members,
 
+    # Used only when collecting the Step 3 devices for the final sync phase.
+    [Parameter()]
+    [switch]$UseTransitiveStep3Members,
+
+    # By default, the script triggers an Intune sync for every unique device
+    # found across the Step 1, Step 2, and Step 3 migration groups.
+    [Parameter()]
+    [switch]$SkipDeviceSync,
+
+    # Small delay between sync requests to reduce Microsoft Graph throttling.
+    [Parameter()]
+    [ValidateRange(0, 5000)]
+    [int]$SyncDelayMilliseconds = 250,
 
     [Parameter()]
     [ValidateRange(1, 120)]
@@ -146,6 +159,7 @@ function Get-LogEmoji {
         '(?i)export job|export status|downloading Intune report|imported .*row'  { return '📊' }
         '(?i)starting Step 1|certificate validation|eligible certificate'        { return '🪪' }
         '(?i)starting Step 2|802\.1X|wired|wireless|profile validation'         { return '📡' }
+        '(?i)sync requested|device sync|synchroniz|sync phase'                   { return '🔄' }
         '(?i)source group|Step 2 group|Step 3 group|device member'               { return '👥' }
         '(?i)retrieving Intune managed devices|Intune managed device'            { return '💻' }
         '(?i)sleeping|waiting .*seconds'                                         { return '😴' }
@@ -1472,11 +1486,125 @@ foreach ($sourceDevice in $step2DevicesForEvaluation) {
 }
 
 # -----------------------------------------------------------------------------
+# DEVICE SYNC: trigger an Intune sync for every unique migration-group device
+# -----------------------------------------------------------------------------
+
+Write-Host ''
+
+if ($SkipDeviceSync) {
+    Write-Log -Level WARN -Message 'Device sync phase was skipped because -SkipDeviceSync was specified.'
+}
+else {
+    Write-Log -Level INFO -Message 'Starting device sync for all unique devices across the Step 1, Step 2, and Step 3 groups.'
+
+    # The Step 3 query is performed here so devices that existed only in Step 3
+    # are also synchronized. Devices added to Step 3 during this execution are
+    # already present in $step2DevicesForEvaluation and are therefore included
+    # even if Entra group membership has not reached eventual consistency yet.
+    $step3DevicesForSync = if ($UseTransitiveStep3Members) {
+        @(Get-GroupDeviceMembers -GroupId $Step3GroupId -Transitive)
+    }
+    else {
+        @($step3CurrentDevices)
+    }
+
+    $syncDeviceMap = @{}
+    $allMigrationDevices = @($step1Devices) + @($step2DevicesForEvaluation) + @($step3DevicesForSync)
+
+    foreach ($device in $allMigrationDevices) {
+        $objectId = [string](Get-ObjectValue -InputObject $device -Name 'id')
+        $deviceId = [string](Get-ObjectValue -InputObject $device -Name 'deviceId')
+
+        $uniqueKey = if (-not [string]::IsNullOrWhiteSpace($objectId)) {
+            "object:$($objectId.ToLowerInvariant())"
+        }
+        elseif (-not [string]::IsNullOrWhiteSpace($deviceId)) {
+            "device:$($deviceId.ToLowerInvariant())"
+        }
+        else {
+            $null
+        }
+
+        if ($null -ne $uniqueKey -and -not $syncDeviceMap.ContainsKey($uniqueKey)) {
+            $syncDeviceMap[$uniqueKey] = $device
+        }
+    }
+
+    $syncDevices = @($syncDeviceMap.Values)
+    Write-Log -Level INFO -Message "Found $($syncDevices.Count) unique device(s) to synchronize."
+
+    foreach ($device in $syncDevices) {
+        $deviceName = [string](Get-ObjectValue -InputObject $device -Name 'displayName')
+        $entraDeviceId = [string](Get-ObjectValue -InputObject $device -Name 'deviceId')
+        $managedDevice = $null
+        $syncAction = $null
+        $syncError = $null
+
+        try {
+            if ([string]::IsNullOrWhiteSpace($entraDeviceId)) {
+                $syncAction = 'SyncSkippedNoEntraDeviceId'
+                Write-Log -Level WARN -Message "$deviceName has no Entra deviceId value. Intune sync skipped."
+                continue
+            }
+
+            $entraKey = $entraDeviceId.ToLowerInvariant()
+            if (-not $managedByEntraDeviceId.ContainsKey($entraKey)) {
+                $syncAction = 'SyncSkippedNotIntuneManaged'
+                Write-Log -Level WARN -Message "$deviceName was not found as an Intune managed device. Sync skipped."
+                continue
+            }
+
+            $managedDevice = $managedByEntraDeviceId[$entraKey]
+            $managedDeviceId = [string](Get-ObjectValue -InputObject $managedDevice -Name 'id')
+            if ([string]::IsNullOrWhiteSpace($managedDeviceId)) {
+                $syncAction = 'SyncSkippedNoIntuneDeviceId'
+                Write-Log -Level WARN -Message "$deviceName has no Intune managed-device ID. Sync skipped."
+                continue
+            }
+
+            if ($PSCmdlet.ShouldProcess($deviceName, 'Trigger Intune device sync')) {
+                $escapedManagedDeviceId = [uri]::EscapeDataString($managedDeviceId)
+                $syncUri = "https://graph.microsoft.com/v1.0/deviceManagement/managedDevices/$escapedManagedDeviceId/syncDevice"
+
+                Invoke-GraphRequestWithRetry `
+                    -Method POST `
+                    -Uri $syncUri | Out-Null
+
+                $syncAction = 'SyncRequested'
+                Write-Log -Level SUCCESS -Message "Intune sync requested for $deviceName."
+
+                if ($SyncDelayMilliseconds -gt 0) {
+                    Start-Sleep -Milliseconds $SyncDelayMilliseconds
+                }
+            }
+            else {
+                $syncAction = 'SyncWhatIf'
+            }
+        }
+        catch {
+            $syncAction = 'SyncError'
+            $syncError = $_.Exception.Message
+            Write-Log -Level ERROR -Message "Intune sync failed for $deviceName`: $syncError"
+        }
+        finally {
+            $results.Add((New-ResultRecord `
+                -Phase 'DeviceSync' `
+                -Device $device `
+                -ManagedDevice $managedDevice `
+                -SourceGroupId "$Step1SourceGroupId;$Step2GroupId;$Step3GroupId" `
+                -Action $syncAction `
+                -ErrorMessage $syncError))
+        }
+    }
+}
+
+# -----------------------------------------------------------------------------
 # Show separate in-memory summaries for both phases
 # -----------------------------------------------------------------------------
 
 $step1Results = @($results | Where-Object Phase -eq 'Step1-Certificate')
 $step2Results = @($results | Where-Object Phase -eq 'Step2-8021X')
+$syncResults = @($results | Where-Object Phase -eq 'DeviceSync')
 
 $step1Added = @($step1Results | Where-Object Action -eq 'Added').Count
 $step1Already = @($step1Results | Where-Object Action -eq 'AlreadyMember').Count
@@ -1490,7 +1618,18 @@ $step2WhatIf = @($step2Results | Where-Object Action -eq 'WhatIf').Count
 $step2NotReady = @($step2Results | Where-Object Action -eq 'SkippedProfilesNotSuccessful').Count
 $step2Errors = @($step2Results | Where-Object Action -eq 'Error').Count
 
+$syncRequested = @($syncResults | Where-Object Action -eq 'SyncRequested').Count
+$syncWhatIf = @($syncResults | Where-Object Action -eq 'SyncWhatIf').Count
+$syncNotManaged = @($syncResults | Where-Object Action -eq 'SyncSkippedNotIntuneManaged').Count
+$syncSkippedOther = @($syncResults | Where-Object Action -in @('SyncSkippedNoEntraDeviceId', 'SyncSkippedNoIntuneDeviceId')).Count
+$syncErrors = @($syncResults | Where-Object Action -eq 'SyncError').Count
 
 Write-Host ''
 Write-Log -Level SUCCESS -Message "Step 1 completed. Added to Step 2: $step1Added | Already members: $step1Already | WhatIf: $step1WhatIf | No eligible certificate: $step1NoCertificate | Errors: $step1Errors"
 Write-Log -Level SUCCESS -Message "Step 2 completed. Added to Step 3: $step2Added | Already members: $step2Already | WhatIf: $step2WhatIf | Profiles not successful: $step2NotReady | Errors: $step2Errors"
+if ($SkipDeviceSync) {
+    Write-Log -Level WARN -Message 'Device sync completed: skipped by parameter.'
+}
+else {
+    Write-Log -Level SUCCESS -Message "Device sync completed. Requested: $syncRequested | WhatIf: $syncWhatIf | Not Intune managed: $syncNotManaged | Other skipped: $syncSkippedOther | Errors: $syncErrors"
+}
